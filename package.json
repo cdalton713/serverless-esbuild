@@ -33,6 +33,7 @@
     "package.json",
     "README.md"
   ],
+  "packageManager": "yarn@1.22.19",
   "scripts": {
     "prepublishOnly": "npm run build",
     "precommit": "npm run test",

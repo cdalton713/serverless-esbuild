@@ -7,7 +7,7 @@ import { satisfies } from 'semver';
 
 interface YarnTree {
   name: string;
-  color: 'bold' | 'dim';
+  color: 'bold' | 'dim' | null;
   children?: YarnTree[];
   hint?: null;
   depth?: number;
@@ -21,6 +21,21 @@ export interface YarnDeps {
   };
 }
 
+interface YarnBerryDependencies {
+  descriptor: string;
+  locator: string;
+}
+
+interface YarnBerryChild {
+  Version: string;
+  Dependencies: YarnBerryDependencies[];
+}
+
+export interface YarnBerryDeps {
+  value: string;
+  children: YarnBerryChild;
+}
+
 const getNameAndVersion = (name: string): { name: string; version: string } => {
   const atIndex = name.lastIndexOf('@');
 
@@ -30,6 +45,22 @@ const getNameAndVersion = (name: string): { name: string; version: string } => {
   };
 };
 
+const getNameAndVersionFromLocator = (name: string): { name: string; version: string } => {
+  const atIndex = name.lastIndexOf('@');
+  return {
+    name: name.slice(0, atIndex),
+    version: name.slice(atIndex + 1),
+  };
+};
+
+const getNameAndVersionBerry = (value: string, child: YarnBerryChild): { name: string; version: string } => {
+  const atIndex = value.lastIndexOf('@');
+
+  return {
+    name: value.slice(0, atIndex),
+    version: child.Version,
+  };
+};
 /**
  * Yarn packager.
  *
@@ -50,8 +81,19 @@ export class Yarn implements Packager {
     return false;
   }
 
-  async getProdDependencies(cwd: string, depth?: number): Promise<DependenciesResult> {
+  public async getYarnMajorVersion(cwd: string): Promise<number> {
     const command = /^win/.test(process.platform) ? 'yarn.cmd' : 'yarn';
+    const args = ['--version'];
+
+    const processOutput = await spawnProcess(command, args, { cwd });
+    const version = processOutput.stdout.trim();
+
+    return parseInt(version.split('.')[0]);
+  }
+
+  private async getProdDependenciesV1(cwd: string, depth?: number): Promise<DependenciesResult> {
+    const command = /^win/.test(process.platform) ? 'yarn.cmd' : 'yarn';
+
     const args = ['list', depth ? `--depth=${depth}` : null, '--json', '--production'].filter(Boolean);
 
     // If we need to ignore some errors add them here
@@ -178,6 +220,164 @@ export class Yarn implements Packager {
     };
   }
 
+  private async getProdDependenciesBerry(cwd: string): Promise<DependenciesResult> {
+    const command = /^win/.test(process.platform) ? 'yarn.cmd' : 'yarn';
+
+    const args = ['info', '--json'].filter(Boolean);
+
+    // If we need to ignore some errors add them here
+    const ignoredYarnErrors = [];
+
+    let parsedDeps: YarnBerryDeps[];
+    try {
+      const processOutput = await spawnProcess(command, args, { cwd });
+      parsedDeps = processOutput.stdout
+        .split('\n')
+        .filter((item) => item !== '')
+        .map((line) => JSON.parse(line)) as YarnBerryDeps[];
+    } catch (err) {
+      if (err instanceof SpawnError) {
+        // Only exit with an error if we have critical npm errors for 2nd level inside
+        const errors = split('\n', err.stderr);
+        const failed = reduce(
+          (f, error) => {
+            if (f) {
+              return true;
+            }
+            return (
+              !isEmpty(error) &&
+              !any((ignoredError) => startsWith(`npm ERR! ${ignoredError.npmError}`, error), ignoredYarnErrors)
+            );
+          },
+          false,
+          errors
+        );
+
+        if (!failed && !isEmpty(err.stdout)) {
+          return { stdout: err.stdout };
+        }
+      }
+
+      throw err;
+    }
+
+    // Produces a version map for the modules present in our root node_modules folder
+    // const rootDependencies = parsedDeps.reduce<DependencyMap>((deps, tree) => {
+    //   const { name, version } = getNameAndVersionBerry(tree.value, tree.children);
+    //   deps[name] ??= {
+    //     version: version,
+    //   };
+    //   return deps;
+    // }, {});
+
+    const convertDependencies = (items: YarnBerryDependencies[]): DependencyMap => {
+      return items.reduce<DependencyMap>((deps, tree) => {
+        const { name, version } = getNameAndVersionFromLocator(tree.locator);
+
+        deps[name] ??= {
+          version,
+          dependencies: {},
+        };
+
+        return deps;
+      }, {});
+    };
+
+    const convertTrees = (trees: YarnBerryDeps[]): DependencyMap => {
+      return trees.reduce<DependencyMap>((deps, tree) => {
+        const { name, version } = getNameAndVersionBerry(tree.value, tree.children);
+
+        deps[name] ??= {
+          version,
+          ...(tree?.children?.Dependencies?.length && {
+            dependencies: convertDependencies(tree.children.Dependencies),
+          }),
+        };
+        // if (satisfies(rootDependencies[name].version, version)) {
+        //   // Package is at root level
+        //   // {
+        //   //   "name": "samchungy-dep-a@1.0.0", <- MATCH
+        //   //   "children": [],
+        //   //   "hint": null,
+        //   //   "color": null,
+        //   //   "depth": 0
+        //   // },
+        //   // {
+        //   //   "name": "samchungy-a@2.0.0",
+        //   //   "children": [
+        //   //     {
+        //   //       "name": "samchungy-dep-a@1.0.0", <- THIS
+        //   //       "color": "dim",
+        //   //       "shadow": true
+        //   //     }
+        //   //   ],
+        //   //   "hint": null,
+        //   //   "color": "bold",
+        //   //   "depth": 0
+        //   // }
+        //   deps[name] ??= {
+        //     version,
+        //     isRootDep: true,
+        //   };
+        // } else {
+        //   // Package info is in another child so we can just ignore
+        //   // samchungy-dep-a@1.0.0 is in the root (see above example)
+        //   // {
+        //   //   "name": "samchungy-b@2.0.0",
+        //   //   "children": [
+        //   //     {
+        //   //       "name": "samchungy-dep-a@2.0.0", <- THIS
+        //   //       "color": "dim",
+        //   //       "shadow": true
+        //   //     },
+        //   //     {
+        //   //       "name": "samchungy-dep-a@2.0.0",
+        //   //       "children": [],
+        //   //       "hint": null,
+        //   //       "color": "bold",
+        //   //       "depth": 0
+        //   //     }
+        //   //   ],
+        //   //   "hint": null,
+        //   //   "color": "bold",
+        //   //   "depth": 0
+        //   // }
+        //   // deps[name] ??= {
+        //   //   version,
+        //   //   dependencies: {},
+        //   // };
+        // }
+
+        // Package is not defined, store it and get the children
+        //     {
+        //       "name": "samchungy-dep-a@2.0.0",
+        //       "children": [],
+        //       "hint": null,
+        //       "color": "bold",
+        //       "depth": 0
+        //     }
+        // deps[name] ??= {
+        //   version,
+        //   dependencies: {},
+        // };
+        return deps;
+      }, {});
+    };
+
+    return {
+      dependencies: convertTrees(parsedDeps),
+    };
+  }
+
+  async getProdDependencies(cwd: string, depth?: number): Promise<DependenciesResult> {
+    const majorVersion = await this.getYarnMajorVersion(cwd);
+    if (majorVersion === 1) {
+      return this.getProdDependenciesV1(cwd, depth);
+    } else if (majorVersion === 3) {
+      return this.getProdDependenciesBerry(cwd);
+    }
+  }
+
   rebaseLockfile(pathToPackageRoot, lockfile) {
     const fileVersionMatcher = /[^"/]@(?:file:)?((?:\.\/|\.\.\/).*?)[":,]/gm;
     const replacements = [];
@@ -198,9 +398,14 @@ export class Yarn implements Packager {
   async install(cwd: string, extraArgs: Array<string>, useLockfile = true) {
     const command = /^win/.test(process.platform) ? 'yarn.cmd' : 'yarn';
 
-    const args = useLockfile
-      ? ['install', '--frozen-lockfile', '--non-interactive', ...extraArgs]
-      : ['install', '--non-interactive', ...extraArgs];
+    let args;
+    if ((await this.getYarnMajorVersion(cwd)) === 1) {
+      args = useLockfile
+        ? ['install', '--frozen-lockfile', '--non-interactive', ...extraArgs]
+        : ['install', '--non-interactive', ...extraArgs];
+    } else {
+      args = ['install', ...extraArgs];
+    }
 
     await spawnProcess(command, args, { cwd });
   }

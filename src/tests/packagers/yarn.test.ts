@@ -31,6 +31,19 @@ describe('Yarn Packager', () => {
     expect(spawnSpy).toBeCalledWith('yarn', ['list', '--json', '--production'], { cwd: './' });
   });
 
+  it('should call spawnProcess with the correct arguments for listing yarn dependencies Berry', async () => {
+    const result = await yarn.getProdDependencies('/Users/christian/Intelligems/intelligems/web/node-backend');
+    console.log(result);
+  });
+
+  it('should call spawnProcess with the correct arguments for getting the yarn version', async () => {
+    const version = await yarn.getYarnMajorVersion(path);
+
+    expect(version).toEqual(1);
+    expect(spawnSpy).toBeCalledTimes(1);
+    expect(spawnSpy).toBeCalledWith('yarn', ['--version'], { cwd: './' });
+  });
+
   it('should call spawnProcess with the correct arguments for listing yarn dependencies when depth is provided', async () => {
     spawnSpy.mockResolvedValueOnce({
       stderr: '',
