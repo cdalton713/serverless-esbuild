@@ -29,6 +29,11 @@ const packagerFactories: Record<PackagerId, () => Promise<Packager>> = {
 
     return new Yarn();
   },
+  async yarnBerry() {
+    const { YarnBerry } = await import('./yarnBerry');
+
+    return new YarnBerry();
+  },
 };
 
 /**

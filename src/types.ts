@@ -80,4 +80,4 @@ export interface IFile {
 }
 export type IFiles = readonly IFile[];
 
-export type PackagerId = 'npm' | 'pnpm' | 'yarn';
+export type PackagerId = 'npm' | 'pnpm' | 'yarn' | 'yarnBerry';
